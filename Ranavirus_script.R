@@ -18,7 +18,7 @@ library(ggpubr)
 library(gridExtra)
 
 #set working directory
-setwd("/Users/mayarayle/Documents/Ranavirus Project/Most Recently Updated Data")
+#setwd("/Users/mayarayle/Documents/Ranavirus Project/Most Recently Updated Data")
 
 #loading in the data
 MetaTransmit <- read_csv("MetaTransmit.csv")
