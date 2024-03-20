@@ -1,0 +1,913 @@
+---
+title: "ranaAnalysisMarkdown"
+author: "Maya Rayle"
+date modified: "4/20/2023"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+Loading and setting up the data, renaming some columns, adding a few columns, data wrangling etc. 
+
+```{r setup, include=FALSE}
+#Loading Packages
+library(tidyverse)
+library(ggplot2)
+library(readr)
+library(stringr)
+library(lubridate)
+library(RColorBrewer)
+library(rstatix)
+library(dplyr)
+library(ggpubr)
+library(gridExtra)
+
+#set working directory
+setwd("/Users/mayarayle/Documents/Ranavirus Project")
+
+#loading in the data
+MetaTransmit <- read_csv("Most Recently Updated Data/MetaTransmit.csv")
+
+#---------------Data wrangling, cleaning up names etc
+
+#getting rid of a couple extra lines that shouldn't be there
+MetaTransmit <- MetaTransmit[-c(439:442),]
+
+#renaming
+names(MetaTransmit)[1] <- "Simple_ID"
+names(MetaTransmit)[2] <- "Exposure_ID"
+names(MetaTransmit)[3] <- "Death_timing"
+names(MetaTransmit)[4] <- "Pre_exp_ID"
+names(MetaTransmit)[5] <- "Exposure_type"
+names(MetaTransmit)[6] <- "Exposure_start"
+names(MetaTransmit)[7] <- "Exposure_duration"
+names(MetaTransmit)[8] <- "Animal_type"
+names(MetaTransmit)[9] <- "Death_date"
+names(MetaTransmit)[12] <- "Erin_ID"
+
+#making a few alterations
+MetaTransmit <- MetaTransmit %>% 
+  #Converting to Numerical, pulling out the "hrs"
+  mutate(Exposure_duration_numerical = parse_number(Exposure_duration)) %>% 
+  #making the start date a date 
+  mutate(Exposure_start = as.Date(mdy(Exposure_start))) %>%
+  #making the death date a date 
+  mutate(Death_date = as.Date(mdy(Death_date))) %>%
+  #setting mean copy final as a numeric value
+  mutate(MeanCopyFinal = as.numeric(MeanCopyFinal)) %>% 
+  #Log of MeanCopyFinal
+  #there's an issue with the zeroes.... they're -inf. To solve this, I add + 1 to everything.
+  #It's not a great solution but it's what I have right now...
+  mutate(logMeanCopyFinalPlus1 = log10(MeanCopyFinal + 1)) %>% 
+  #MeanCopyFinal + 1 (for the glm linear model)
+  mutate(MeanCopyFinalPlus1 = MeanCopyFinal + 1) %>% 
+  #create the column Trio ID (for pair matching) and modify it from Exposure ID
+  mutate(Trio_ID = str_replace(Exposure_ID, pattern = ".S[HQ].", replacement = "."))
+
+#Larval Treatment IDs -- adding a new column
+MetaTransmit$Larval_condition <- ifelse(grepl("ALS", MetaTransmit$Exposure_ID), "ALS", NA)
+MetaTransmit$Larval_condition[grepl("AHS", MetaTransmit$Exposure_ID)] = "AHS"
+MetaTransmit$Larval_condition[grepl("EHS", MetaTransmit$Exposure_ID)] = "EHS"
+MetaTransmit$Larval_condition[grepl("ELS", MetaTransmit$Exposure_ID)] = "ELS"
+
+#Creating a single column for Status using Status and Status_1 (from the redos)
+MetaTransmit$Final_status[grepl("Neg", MetaTransmit$Status)] = "Neg"
+MetaTransmit$Final_status[grepl("Pos", MetaTransmit$Status)] = "Pos"
+MetaTransmit$Final_status[grepl("Neg", MetaTransmit$Status_1)] = "Neg"
+MetaTransmit$Final_status[grepl("Pos", MetaTransmit$Status_1)] = "Pos"
+
+#creating a binomial of infection status
+MetaTransmit$Final_status_binomial[grepl("Pos", MetaTransmit$Final_status)] = "1"
+MetaTransmit$Final_status_binomial[grepl("Neg", MetaTransmit$Final_status)] = "0"
+
+#doing some factoring: 
+MetaTransmit <- MetaTransmit %>% 
+  #factor exposure duration in order
+  mutate(Exposure_duration = factor(Exposure_duration, 
+                                     levels = c("1hr", "6hr", "12hr", "24hr", "48hr"))) %>% 
+  #factor larval condition in order
+  mutate(Larval_condition = factor(Larval_condition, 
+                                    levels = c("AHS", "ALS", "EHS", "ELS"))) %>% 
+
+  #factor animal type in order
+  mutate(Animal_type = factor(Animal_type, 
+                               levels = c("Naive", "Infected","Control (pseudo-naive)", 
+                                          "Control (pseudo-infected)")))
+
+
+#there were a few trio IDs where the animal was paired with a different one than the id number. So I'm fixing these manually. 
+#In Shared (direct contact), ELS.24.4 virus (MR119) was paired with ELS.24.6 naïve (MR326), and ELS.24.6 virus (MR404) was paired with ELS.24.4 naïve (MR324). 
+#Even though the sequential naives were unaffected, I still need to make sure the pairs are the same. So I am just changing the naive shared animals to the opposite trio ID. 
+  #ELS.24.6 naïve (MR326) --> ELS.24.4
+  #ELS.24.4 naïve (MR324) --> ELS.24.6
+
+# Define the conditions and replacement values
+conditions <- c("MR326", "MR324")
+replacement_values <- c("ELS.24.4", "ELS.24.6")
+ 
+# Use replace() to replace the names in the 'Names' column
+MetaTransmit$Trio_ID <- replace(MetaTransmit$Trio_ID, MetaTransmit$Simple_ID %in% conditions, replacement_values)
+
+#---------------------------------------------------------------------------------------------------------------------
+#Data Checks - making sure that everything was entered correctly. 
+# Add a new column to store the result
+MetaTransmit$ContainsNumeric <- FALSE
+MetaTransmit$MatchesExposureType <- FALSE
+
+# Loop through each row
+for (i in 1:nrow(MetaTransmit)) {
+  # Check if the numeric value in Exposure_duration_numerical is contained in the string in Exposure_ID
+  if (grepl(paste0("\\.", MetaTransmit$Exposure_duration_numerical[i], "\\."), MetaTransmit$Exposure_ID[i])) {
+    MetaTransmit$ContainsNumeric[i] <- TRUE
+  }
+  # Check if ".SH." matches the value in column A and ".SH." matches the value in column C
+  if (grepl("\\.SH\\.", MetaTransmit$Exposure_ID[i]) && MetaTransmit$Exposure_type[i] == "Shared") {
+    MetaTransmit$MatchesExposureType[i] <- TRUE
+  }
+  
+  # Check if ".SQ." matches the value in column A and ".SQ." matches the value in column C
+  if (grepl("\\.SQ\\.", MetaTransmit$Exposure_ID[i]) && MetaTransmit$Exposure_type[i] == "Sequential") {
+    MetaTransmit$MatchesExposureType[i] <- TRUE
+  }
+}
+
+# Print the result
+summary(MetaTransmit$MatchesExposureType)
+#there were three falses, and they were all infective animals that didn't make it to the shared expt so all good. 
+summary(MetaTransmit$ContainsNumeric)
+
+#deleting the columns I used here for checks: 
+MetaTransmit <- MetaTransmit %>% 
+  subset(select=-c(MatchesExposureType, ContainsNumeric)) 
+
+
+#checking dates are correct: 
+MetaTransmitDateCheck <- MetaTransmit %>% 
+  subset(Death_timing == "Euthanization") %>% 
+  subset(Animal_type == "Naive")
+
+MetaTransmitDateCheck$StartDateCorrect <- FALSE
+
+for (x in 1:nrow(MetaTransmitDateCheck)) {
+  #checking exposure start dates: 
+  if ((MetaTransmitDateCheck$Exposure_type[x] == "Shared" && MetaTransmitDateCheck$Exposure_start[x] == "2021-6-27") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[x] == "Shared" && MetaTransmitDateCheck$Exposure_start[x] == "2021-7-11") 
+      |
+      (MetaTransmitDateCheck$Exposure_type[x] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[x] == "1" && 
+       MetaTransmitDateCheck$Exposure_start[x] == "2021-7-11") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[x] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[x] == "1" && 
+       MetaTransmitDateCheck$Exposure_start[x] == "2021-6-27")
+      |
+      (MetaTransmitDateCheck$Exposure_type[x] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[x] == "6" && 
+       MetaTransmitDateCheck$Exposure_start[x] == "2021-7-11") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[x] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[x] == "6" && 
+       MetaTransmitDateCheck$Exposure_start[x] == "2021-6-27")
+      |
+      (MetaTransmitDateCheck$Exposure_type[x] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[x] == "12" && 
+       MetaTransmitDateCheck$Exposure_start[x] == "2021-7-11") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[x] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[x] == "12" && 
+       MetaTransmitDateCheck$Exposure_start[x] == "2021-6-27")
+      | 
+      (MetaTransmitDateCheck$Exposure_type[x] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[x] == "24" && 
+       MetaTransmitDateCheck$Exposure_start[x] == "2021-7-12") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[x] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[x] == "24" && 
+       MetaTransmitDateCheck$Exposure_start[x] == "2021-6-28") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[x] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[x] == "48" && 
+       MetaTransmitDateCheck$Exposure_start[x] == "2021-7-13") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[x] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[x] == "48" && 
+       MetaTransmitDateCheck$Exposure_start[x] == "2021-6-29") 
+      ) {
+    MetaTransmitDateCheck$StartDateCorrect[x] <- TRUE
+  }
+}
+
+summary(MetaTransmitDateCheck$StartDateCorrect)
+
+#ok I found one that was recorded wrong. 
+#MR438 (AHS.SQ.48.5) had a start date incorrectly written as 7/11. It should be 7/13 since this was a 48hr sequential. 
+#I confirmed it was euthanized on the 18th so this was clearly an error in the entry. I corrected it in the excel doc. 
+
+#what about death dates?
+
+MetaTransmitDateCheck$DeathDateCorrect <- FALSE
+
+for (y in 1:nrow(MetaTransmitDateCheck)) {
+  #checking exposure start dates: 
+  if( #SHARED CONDITIONS
+      (MetaTransmitDateCheck$Exposure_type[y] == "Shared" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "1" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-16") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Shared" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "1" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-2")
+      |
+      (MetaTransmitDateCheck$Exposure_type[y] == "Shared" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "6" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-16") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Shared" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "6" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-02")
+      |
+      (MetaTransmitDateCheck$Exposure_type[y] == "Shared" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "12" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-16") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Shared" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "12" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-02")
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Shared" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "24" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-17") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Shared" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "24" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-03") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Shared" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "48" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-18") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Shared" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "48" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-04") 
+      |
+      #SEQUENTIAL CONDITIONS
+      
+      (MetaTransmitDateCheck$Exposure_type[y] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "1" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-18") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "1" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-4")
+      |
+      (MetaTransmitDateCheck$Exposure_type[y] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "6" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-18") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "6" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-04")
+      |
+      (MetaTransmitDateCheck$Exposure_type[y] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "12" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-18") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "12" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-04")
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "24" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-19") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "24" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-05") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "48" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-20") 
+      | 
+      (MetaTransmitDateCheck$Exposure_type[y] == "Sequential" && 
+       MetaTransmitDateCheck$Exposure_duration_numerical[y] == "48" && 
+       MetaTransmitDateCheck$Death_date[y] == "2021-07-06")
+    
+  ) {
+    MetaTransmitDateCheck$DeathDateCorrect[y] <- TRUE
+  }
+}
+
+summary(MetaTransmitDateCheck$DeathDateCorrect)
+#all correct!
+
+```
+
+
+Subseting out a few smaller data sets for future analysis. 
+Specifically: 
+ - Naive
+    - Naive Sequential
+       - Zeroes removed for viral load
+    - Naive Shared
+       - Zeroes removed for viral load
+ - Infected
+ - Control animals
+     - Control pseudo-naive
+     - Control pseudo-infected 
+ 
+```{r}
+#----------Subset naive data
+MetaTransmit_naive <- MetaTransmit %>% 
+  subset(Animal_type== "Naive",)
+
+#Subset Sequential Naives
+MetaTransmitNaiveSQ <- MetaTransmit_naive %>% 
+  subset(Exposure_type == "Sequential",)
+#subset Shared Naives
+MetaTransmitNaiveSH <- MetaTransmit_naive %>% 
+  subset(Exposure_type == "Shared",)
+
+# --------Getting rid of 0s for the shared and sequential data
+
+#Naives Overall
+NoZeroesNaive <- MetaTransmit %>%
+  subset(Animal_type == "Naive")%>%
+  subset(!(MeanCopyFinal == 0)) %>%
+  mutate(logMeanCopyFinal = log(MeanCopyFinal))
+
+#SHARED
+#getting rid of the 0s as recommended
+NoZeroesNaiveSH <- MetaTransmitNaiveSH %>% 
+  subset(!(MeanCopyFinal == 0)) %>% 
+  #Adding a variable called logmeancopyfinal without the zeroes
+  mutate(logMeanCopyFinal = log(MeanCopyFinal)) 
+
+#SEQUENTIAL
+#getting rid of the 0s as Jesse Recommended
+NoZeroesNaiveSQ <- MetaTransmitNaiveSQ %>% 
+  subset(!(MeanCopyFinal == 0)) %>% 
+  #Adding a variable called logmeancopyfinal without the zeroes
+  mutate(logMeanCopyFinal = log(MeanCopyFinal)) 
+
+#-----------Subseting out virus animals
+MetaTransmit_virus <- MetaTransmit %>% 
+  subset(MetaTransmit$Animal_type=="Infected",)
+
+#------------Subsetting  control animals 
+MetaTransmit_controlPN <- MetaTransmit %>% 
+  subset(Animal_type=="Control (pseudo-naive)",)
+MetaTransmit_controlPV <- MetaTransmit %>% 
+  subset(MetaTransmit$Animal_type=="Control (pseudo-infected)",)
+```
+
+## The Plots
+
+Naive Suspected Mortalities Based on Death Timing
+
+```{r}
+#Suspected Ranavirus Mortalities (Focal Naive)
+
+#facet labels
+# New facet label names for exposure type variable
+exposure.labs <- c("Indirect contact", "Direct contact")
+names(exposure.labs) <- c("Sequential", "Shared")
+
+MetaTransmit_naive$Death_timing <- as.factor(MetaTransmit_naive$Death_timing)
+MetaTransmit_naive$Exposure_duration_numerical <- as.factor(MetaTransmit_naive$Exposure_duration_numerical)
+MetaTransmit_naive$Exposure_type <- as.factor(MetaTransmit_naive$Exposure_type)
+MetaTransmit_naive$Exposure_duration_numerical <- as.factor(MetaTransmit_naive$Exposure_duration_numerical)
+
+#annotations for the text on the ggplot
+anno <- data.frame(x1 = c(1, 1, 1, 4, 4, 4), 
+                   y1 = c(20, 16.5, 9, 24, 21.5, 11), 
+                   lab = c("Died after","Died during", "Euthanized", "Died after","Died during", "Euthanized"),
+                   Exposure_type = c("Sequential", "Sequential", "Sequential", "Shared", "Shared", "Shared")
+                   )
+
+anno
+
+#plot naive animal mortality
+#ggplot(MetaTransmit_naive, aes(x= Exposure_duration_numerical , y= lengths(Exposure_duration), fill = Death_timing)) + 
+ggplot(MetaTransmit_naive, aes(x= Exposure_duration_numerical)) + 
+  stat_count(aes(x = Exposure_duration_numerical, group = Death_timing)) +
+  geom_bar(stat= "identity", mapping = aes(x= Exposure_duration_numerical , y= lengths(Exposure_duration), 
+                                           fill = Death_timing)) +
+  guides(fill=guide_legend(title=NULL)) + 
+  facet_wrap(.~Exposure_type, 
+  labeller = labeller(Exposure_type = exposure.labs) 
+  ) +
+  geom_text(data = anno, aes(x = x1,  y = y1, label = lab), 
+            size = 2.9, family = "helvetica", color = "white") +
+  labs(x = "Time between exposures (hrs)               Exposure period (hrs)", 
+       y = "Susceptible animal counts") + 
+  theme(text = element_text(size = 2),
+        axis.title.y = element_text(size = 15, hjust = 0.7, family = "helvetica"),
+        axis.title.x = element_text(size = 15, hjust = 0.3, family = "helvetica"),
+        strip.text.x = element_text(size = 20, family = "helvetica"),
+        axis.text.x = element_text(size = 15, family = "helvetica"),
+        axis.text.y = element_text(size = 15, family = "helvetica"),
+        #axis.ticks.y = element_line(linewidth = 0.5),
+        legend.text=element_text(size=13, family = "helvetica"),
+        legend.position = "none") + 
+  scale_fill_brewer(palette="Set2")
+
+ggsave(
+  'suspectedMortalities.jpg', plot = last_plot(), width = 200, height = 120, units = "mm")
+
+```
+
+
+Naive Ranavirus Status
+This is much higher than I had expected. Nearly all of the animals got infected. I would have expected the sequential exposures to have more negatives for the higher durations (48hrs for example), instead of the lower values (1hr). 
+```{r}
+#Infection Status (Focal Naive)
+
+#annotations
+annotations <- data.frame(x1 = c(1, 1, 1, 1, 1, 3), 
+                   y1 = c(23, 11, .5, 23.7, 11, .5), 
+                   lab = c("Neg","Pos", "NA", "Neg","Pos", "NA"),
+                   Exposure_type = c("Sequential", "Sequential", "Sequential", "Shared", "Shared", "Shared")
+                   )
+
+#plot naive animal mortality
+#ggplot(MetaTransmit_naive, aes(x= Exposure_duration_numerical, y= lengths(Exposure_duration_numerical), fill = Final_status)) + 
+ggplot(MetaTransmit_naive, aes(x= Exposure_duration_numerical)) + 
+  stat_count(aes(x = Exposure_duration_numerical, group = Final_status)) +
+  geom_bar(stat= "identity", mapping = aes(x= Exposure_duration_numerical , y= lengths(Exposure_duration), 
+                                           fill = Final_status)) +
+  guides(fill=guide_legend(title=NULL)) + 
+  facet_wrap(~Exposure_type, 
+  labeller = labeller(Exposure_type = exposure.labs)
+  ) +
+  geom_text(data = annotations, aes(x = x1,  y = y1, label = lab), size = 3, family = "helvetica", 
+            color = "white") +
+  labs(x = "Time between exposures (hrs)               Exposure period (hrs)", y = "Susceptible animal counts") + 
+  theme(axis.title.y = element_text(size = 15, hjust = 0.7, family = "helvetica"),
+        axis.title.x = element_text(size = 15, hjust = 0.3, family = "helvetica"),
+        strip.text.x = element_text(size = 20, family = "helvetica"),
+        axis.text.x = element_text(size = 15, family = "helvetica"),
+        axis.text.y = element_text(size = 15, family = "helvetica"),
+        legend.text=element_text(size=13, family = "helvetica"),
+        legend.position = "none") + 
+  #scale_fill_brewer(palette="Set2")
+  scale_fill_manual(breaks = c("Neg", "Pos", NA), 
+                       values=c("lightblue", "darkred", "grey"))
+
+ggsave(
+  'virusStatusNaive.jpg',
+  plot = last_plot(), width = 200, height = 120, units = "mm"
+)
+
+```
+Virus Animals
+These results look good for the most part, but that one 1hr shared negative should not be negative. I think it's likely a lab error. 
+```{r}
+#plot mortality
+ggplot(MetaTransmit_virus, aes(x= Exposure_duration , y= lengths(Exposure_duration), fill = Final_status)) + 
+  geom_bar(stat= "identity") +
+  guides(fill=guide_legend(title=NULL)) + 
+  labs(x = "Exposure Period", y = "Infective Animal Counts") + 
+  theme(axis.title.y = element_text(size = 18, hjust = 0.7),
+        axis.title.x = element_text(size = 18, hjust = 0.5),
+        strip.text.x = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        legend.text=element_text(size=15),
+        axis.title = element_text(size=20, color = "black"),
+        legend.position = "bottom") + 
+  #scale_fill_brewer(palette="Set2")
+  scale_fill_manual(breaks = c("Neg", "Pos", NA), 
+                       values=c("lightblue", "darkred", "grey"))
+
+ggsave(
+  'virusStatusVirus.jpg',
+  plot = last_plot(),
+  device = NULL,
+  path = NULL,
+  scale = 1,
+  width = NA,
+  height = NA,
+  units = c("in", "cm", "mm", "px"),
+  dpi = 300,
+  limitsize = TRUE,
+  bg = NULL
+)
+
+```
+
+
+Control Naive Animals
+These results are exactly as expected. None of the control animals were infected. 
+
+Just realized 1/11/2023 that Control animal MR114, AHS.SQ.48.C pseudo-naive was incorrectly labeled as a Naive animal. I corrected it to reclassify from Naive to Control (pseudo-naive). Unfortunately, this animal did test positive, so I'll need to correct the control write up in the paper. Low viral copy number of about 100 though, and neither pair tested positive. Batch 2. I found the tape label picture and I didn't have any notes on it so I don't think it got paired with a non-control animal during the experiment, but I do have a vague memory of a control being used in an exposure experiment, but I may be thinking of something else (possibly that an ELS animal was paired with an EHS animal in the controls, which I did see in the notes). 
+
+```{r}
+#plot naive animal mortality
+ggplot(MetaTransmit_controlPN, aes(x= Exposure_duration , y= lengths(Exposure_duration), fill = Final_status)) + 
+  geom_bar(stat= "identity") +
+  guides(fill=guide_legend(title=NULL)) + 
+  facet_wrap(~Exposure_type, 
+  labeller = labeller(Exposure_type = exposure.labs)
+  ) +
+  labs(x = "Time Between Exposures         Exposure Period", y = "Control Susceptible Counts") + 
+  theme(axis.title.y = element_text(size = 18, hjust = 0.7),
+        axis.title.x = element_text(size = 18, hjust = 0.3),
+        strip.text.x = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        legend.text=element_text(size=15),
+        axis.title = element_text(size=20, color = "black"),
+        legend.position = "bottom") + 
+  #scale_fill_brewer(palette="Set2")
+  scale_fill_manual(breaks = c("Neg", "Pos", NA), 
+                       values=c("lightblue", "darkred", "grey"))
+
+ggsave(
+  'virusStatusControlPseudonaive.jpg',
+  plot = last_plot(),
+  device = NULL,
+  path = NULL,
+  scale = 1,
+  width = NA,
+  height = NA,
+  units = c("in", "cm", "mm", "px"),
+  dpi = 300,
+  limitsize = TRUE,
+  bg = NULL
+)
+
+```
+
+Control Pseudovirus Animals: 
+Note - there is one 48hr control pseudo-infected positive but the viral copy is quite low (mean = 772), so it seems like a contamination issue in the lab. It may be worth redoing the sample if that is a possibility. 
+```{r}
+#plot naive animal mortality
+ggplot(MetaTransmit_controlPV, aes(x= Exposure_duration , y= lengths(Exposure_duration), fill = Final_status)) + 
+  geom_bar(stat= "identity") +
+  guides(fill=guide_legend(title=NULL)) + 
+  labs(x = "Exposure Period", y = "Control Pseudo-infectives Counts") + 
+  theme(axis.title.y = element_text(size = 15, hjust = 0.7),
+        axis.title.x = element_text(size = 18, hjust = 0.5),
+        strip.text.x = element_text(size = 20),
+        axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        legend.text=element_text(size=15),
+        axis.title = element_text(size=20, color = "black"),
+        legend.position = "bottom") + 
+  #scale_fill_brewer(palette="Set2")
+  scale_fill_manual(breaks = c("Neg", "Pos", NA), 
+                       values=c("lightblue", "darkred", "grey"))
+
+ggsave(
+  'virusStatusControlPseudovirus.jpg',
+  plot = last_plot(),
+  device = NULL,
+  path = NULL,
+  scale = 1,
+  width = NA,
+  height = NA,
+  units = c("in", "cm", "mm", "px"),
+  dpi = 300,
+  limitsize = TRUE,
+  bg = NULL
+)
+```
+
+#Performing a few data visualizations on viral load and exposure duration: 
+
+Performing data visualization for shared and sequential boxplots and the facet-wrapped violin plots using the log mean copy final and 0s excluded (previously it was log mean copy final plus 1). Since the linear model does it this way, I think it's most appropriate to exclude 0s on the visualization. 
+
+```{r}
+#-------------Boxplots
+
+#Violin Box Plot Shared
+ggplot(NoZeroesNaiveSH, aes(x=Exposure_duration, y= log(MeanCopyFinal)))+
+  geom_violin()+
+  geom_boxplot(alpha=0.3) + 
+  labs(x = "Exposure Period", y = "Log of Viral Load") 
+ggsave("NaiveSHViralLoadViolinNoZeroes.jpg", plot = last_plot())
+
+#Violin Box Plot Sequential
+ggplot(NoZeroesNaiveSQ, aes(x=Exposure_duration, y= log(MeanCopyFinal)))+
+  geom_violin()+
+  geom_boxplot(alpha=0.3) + 
+  labs(x = "Time Between Exposures", y = "Log of Viral Load")
+ggsave("NaiveSQViralLoadViolinNoZeroes.jpg", plot = last_plot())
+
+NoZeroesNaive$Exposure_duration_numerical <- as.factor(NoZeroesNaive$Exposure_duration_numerical)
+
+#violin boxplots of shared and sequential facet_wrapped
+ggplot(NoZeroesNaive, aes(x=Exposure_duration_numerical, y= MeanCopyFinal, 
+                               fill = Exposure_duration_numerical)) +
+  #geom_violin()+
+  geom_boxplot(alpha=0.5, outlier.shape = NA) + 
+  geom_jitter(size = 0.8, alpha = 0.5, position = position_jitter(width = .2)) +
+  scale_y_continuous(trans='log10') +
+  annotation_logticks(sides = "l", outside = TRUE, 
+                      short = unit(.4,"mm"),
+                      mid = unit(1,"mm"),
+                      long = unit(2,"mm")) +
+  coord_cartesian(clip = "off") +
+  facet_wrap(~Exposure_type, 
+  labeller = labeller(Exposure_type = exposure.labs)
+  ) +
+  labs(x = "Time between exposures (hrs)               Exposure period (hrs)", y = "Viral load") + 
+  theme(axis.title.y = element_text(size = 15, hjust = 0.7, family = "helvetica"),
+        axis.title.x = element_text(size = 15, hjust = 0.3, family = "helvetica"),
+        strip.text.x = element_text(size = 20, family = "helvetica"),
+        axis.text.x = element_text(size = 15, family = "helvetica"),
+        axis.text.y = element_text(size = 15, family = "helvetica"),
+        #axis.ticks.length.y = unit(4, "mm"),
+        legend.position = "none") + 
+  scale_fill_brewer(palette = "YlOrRd")
+ggsave("ViralLoadBoxNoZeroes.jpg", plot = last_plot(), width = 200, height = 120, units = "mm")
+  
+```
+
+
+#Linear Models for Viral Load and Exposure Durations by Experiment: 
+
+```{r}
+
+#--------------NEW ATTEMPT BASED ON JESSE BRUNNER'S FEEDBACK 4/20
+#assuming no intercept
+#V ≈ b*Duration
+#log(V) ≈ log(b) + log(Duration)
+
+NoZeroesNaiveSH$Exposure_duration_numerical <- as.numeric(NoZeroesNaiveSH$Exposure_duration_numerical)
+NoZeroesNaiveSQ$Exposure_duration_numerical <- as.numeric(NoZeroesNaiveSQ$Exposure_duration_numerical)
+
+
+#the linear model shared
+log_transformed_lm_SH = glm(log(MeanCopyFinal) ~ log(Exposure_duration_numerical), data = NoZeroesNaiveSH)
+summary(log_transformed_lm_SH)
+plot(log_transformed_lm_SH)
+
+#the linear model sequential
+log_transformed_lm_SQ = glm(log(MeanCopyFinal) ~ log(Exposure_duration_numerical), data = NoZeroesNaiveSQ)
+summary(log_transformed_lm_SQ)
+plot(log_transformed_lm_SQ)
+```
+
+
+#Paired Pearson's Linear Model: 
+
+The goal here is to compare the viral load of the infected animal with the paired naive animal to see if an animal gets a more severe infection from an infected animal with a higher viral load. 
+
+```{r}
+#Ok so this is pairing the infected animal with the naive animal by ID for the Shared housing experiment. 
+#Shared Housing
+Shared_grouped <- MetaTransmit %>% 
+  #subset(!(MeanCopyFinal == 0)) %>%
+  select(Trio_ID, Exposure_type, MeanCopyFinal, Animal_type, Exposure_duration_numerical, Larval_condition, Batch) %>% 
+  filter(Exposure_type == "Shared" & Animal_type == "Infected" | 
+           Exposure_type == "Shared" & Animal_type == "Naive") %>% 
+  select(Trio_ID, Animal_type, MeanCopyFinal, Exposure_duration_numerical, Larval_condition, Batch) %>% 
+  pivot_wider(names_from = Animal_type, values_from = MeanCopyFinal)
+
+#Sequential Housing
+Sequential_grouped <- MetaTransmit %>% 
+  #subset(!(MeanCopyFinal == 0)) %>%
+  select(Trio_ID, Exposure_type, MeanCopyFinal, Animal_type, Exposure_duration_numerical, Larval_condition, Batch) %>% 
+  filter(Exposure_type == "Shared" & Animal_type == "Infected" | 
+           Exposure_type == "Sequential" & Animal_type == "Naive") %>% 
+  select(Trio_ID, Animal_type, MeanCopyFinal, Exposure_duration_numerical, Larval_condition, Batch) %>% 
+  pivot_wider(names_from = Animal_type, values_from = MeanCopyFinal)
+
+#---------------------------------------
+#Can I group the data better?
+merged_groups <- merge(Shared_grouped, Sequential_grouped, all.x = TRUE, all.y = TRUE)
+
+#merged_groups$Exposure_type_naive <- ifelse(grepl("Shared", merged_groups$Exposure_type), "Shared", "Sequential")
+
+Grouped_data <- MetaTransmit %>% 
+  select(Trio_ID, Exposure_type, MeanCopyFinal, Animal_type, Exposure_duration_numerical, Larval_condition, Batch) %>% 
+  filter(Exposure_type == "Shared" & Animal_type == "Infected" | 
+           Exposure_type == "Shared" & Animal_type == "Naive" | 
+           Exposure_type == "Sequential" & Animal_type == "Naive") %>% 
+  select(Trio_ID, Animal_type, Exposure_type, MeanCopyFinal, Exposure_duration_numerical, Larval_condition, Batch) %>% 
+  pivot_wider(names_from = Animal_type | Exposure_type, values_from = MeanCopyFinal)
+
+#doesn't have larval condition or batch
+#---------------------------------------------------------
+#trying to run GLMs on the paired data: need to subset out the 0s
+Shared_grouped_nozeroes <- Shared_grouped %>% 
+  subset(!(Naive == 0 | Infected == 0)) #| is.na(Naive) | is.na(Infected)))
+
+Sequential_grouped_nozeroes <- Sequential_grouped %>% 
+  subset(!(Naive == 0 | Infected == 0))
+
+
+#SHARED
+Shared_grouped_nozeroes$Exposure_duration_numerical <- as.numeric(Shared_grouped_nozeroes$Exposure_duration_numerical)
+
+#the linear model shared. AIC = 692.61
+lm_SH_paired = glm(log(Naive) ~ log(Exposure_duration_numerical), data = Shared_grouped_nozeroes)
+summary(lm_SH_paired)
+plot(lm_SH_paired)
+
+#add in Infective Viral Load as a predictor variable. AIC: 693.56
+lm_SH_paired_plus_inf = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected), data = Shared_grouped_nozeroes)
+summary(lm_SH_paired_plus_inf)
+plot(lm_SH_paired_plus_inf)
+
+#ok what if we add in larval condition?  AIC: 697.19
+lm_SH_paired_Inf_Larval = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Larval_condition, data = Shared_grouped_nozeroes)
+summary(lm_SH_paired_Inf_Larval)
+plot(lm_SH_paired_Inf_Larval)
+#nope it's slightly worse. 
+
+#ok what if we add in batch? AIC: 671.32
+lm_SH_paired_Inf_batch = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch, data = Shared_grouped_nozeroes)
+summary(lm_SH_paired_Inf_batch)
+plot(lm_SH_paired_Inf_batch)
+
+#ok what if we keep batch and take out log(infected)? AIC: 669.43. BEST MODEL (by a tiny bit)
+lm_SH_paired_batch = glm(log(Naive) ~ log(Exposure_duration_numerical) + Batch, data = Shared_grouped_nozeroes)
+summary(lm_SH_paired_batch)
+plot(lm_SH_paired_batch)
+
+#-----------------------------
+#SEQUENTIAL
+Sequential_grouped_nozeroes$Exposure_duration_numerical <- as.numeric(Sequential_grouped_nozeroes$Exposure_duration_numerical)
+
+#the linear model SQ: AIC: 672.39
+lm_SQ_paired = glm(log(Naive) ~ log(Exposure_duration_numerical), data = Sequential_grouped_nozeroes)
+summary(lm_SQ_paired)
+plot(lm_SQ_paired)
+
+#add in Infective Viral Load as a predictor variable: AIC: 672.15. BEST MODEL (by a little bit). 
+lm_SQ_paired_plus_inf = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected), data = Sequential_grouped_nozeroes)
+summary(lm_SQ_paired_plus_inf)
+plot(lm_SQ_paired_plus_inf)
+
+#ok what if we add in larval condition? AIC: 674.65
+lm_SQ_paired_Inf_Larval = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Larval_condition, data = Sequential_grouped_nozeroes)
+summary(lm_SQ_paired_Inf_Larval)
+plot(lm_SQ_paired_Inf_Larval)
+
+#ok what if we add in batch? AIC: 673.71. 
+lm_SQ_paired_Inf_batch = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch, data = Sequential_grouped_nozeroes)
+summary(lm_SQ_paired_Inf_batch)
+plot(lm_SQ_paired_Inf_batch)
+
+```
+
+
+
+Testing for an effect of salinity and heat treatments on viral load: 
+
+All of the animals came out of Nicole's salinity and heat treatments as tadpoles
+
+```{r}
+#--------------Visualizing it first
+#SHARED
+ggplot(data = NoZeroesNaiveSH, aes(x=Larval_condition, y = log(MeanCopyFinal), fill = Larval_condition)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "BrBG") +
+  theme(legend.position = "none")
+#SEQUENTIAL
+ggplot(data = NoZeroesNaiveSQ, aes(x=Larval_condition, y = log(MeanCopyFinal), fill = Larval_condition)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "BrBG") +
+  theme(legend.position = "none")
+
+#--------------1-way ANOVA
+
+set.seed(1234)
+
+#SHARED
+# Compute the analysis of variance
+res_aov_SH <- aov(log(MeanCopyFinal) ~ Larval_condition, data = NoZeroesNaiveSH)
+# Summary of the analysis
+summary(res_aov_SH)
+
+#SEQUENTIAL
+# Compute the analysis of variance
+res_aov_SQ <- aov(log(MeanCopyFinal) ~ Larval_condition, data = NoZeroesNaiveSQ)
+# Summary of the analysis
+summary(res_aov_SQ)
+
+
+
+#export a cleaned up csv
+write.csv(MetaTransmit, "MetaTransmitCleaned.csv", row.names=FALSE)
+
+```
+
+All the Summary Stats I need 
+```{r}
+
+#Summary Stats. 
+MetaTransmitNaiveSH$Death_timing <- as.factor(MetaTransmitNaiveSH$Death_timing)
+MetaTransmitNaiveSQ$Death_timing <- as.factor(MetaTransmitNaiveSQ$Death_timing)
+
+MetaTransmitNaiveSH$Exposure_duration_numerical <- as.factor(MetaTransmitNaiveSH$Exposure_duration_numerical)
+
+#Death Timing
+summary(MetaTransmitNaiveSH$Death_timing)
+summary(MetaTransmitNaiveSQ$Death_timing)
+
+#Shared
+MetaTransmitNaiveSH$Final_status <- as.factor(MetaTransmitNaiveSH$Final_status)
+summary(MetaTransmitNaiveSH$Final_status)
+
+Summary_exposure_status_SH <- MetaTransmitNaiveSH%>% 
+  group_by(Exposure_duration_numerical, Final_status_binomial) %>% 
+  summarise(n())
+
+
+Summary_naiveSH <- MetaTransmitNaiveSH%>% 
+  group_by(Exposure_duration_numerical, Death_timing) %>% 
+  summarise(n())
+
+viral_load_mean_summary_naiveSH <- MetaTransmitNaiveSH%>% 
+  group_by(Exposure_duration_numerical) %>% 
+  subset(!is.na(MeanCopyFinal)) %>% 
+  summarise(mean(MeanCopyFinal))
+
+viral_load_mean_Batch_naiveSH <- MetaTransmitNaiveSH%>% 
+  group_by(Batch) %>% 
+  subset(!is.na(MeanCopyFinal)) %>% 
+  summarise(mean(MeanCopyFinal))
+
+#Sequential
+MetaTransmitNaiveSQ$Final_status <- as.factor(MetaTransmitNaiveSQ$Final_status)
+MetaTransmitNaiveSQ$Exposure_duration_numerical <- as.factor(MetaTransmitNaiveSQ$Exposure_duration_numerical)
+summary(MetaTransmitNaiveSQ$Final_status)
+#summarise by exposure period
+
+Summary_exposure_status_SQ <- MetaTransmitNaiveSQ%>% 
+  group_by(Exposure_duration_numerical, Final_status_binomial) %>% 
+  summarise(n())
+
+#death timing summary
+summary(MetaTransmitNaiveSQ$Death_timing)
+
+Summary_naiveSQ <- MetaTransmitNaiveSQ%>% 
+  group_by(Exposure_duration_numerical, Death_timing) %>% 
+  summarise(n())
+
+Summary_control_pv <- MetaTransmit%>% 
+  group_by(Animal_type) %>% 
+  summarise(n())
+
+# ------------------
+#5 number summaries - a bit clunky but here it is. 
+
+#SEQUENTIAL
+simpleSQ <- NoZeroesNaiveSQ %>% 
+  select(Exposure_duration, logMeanCopyFinal) %>% 
+  mutate(Exposure_duration = as.factor(Exposure_duration))
+#1hr
+simpleSQ1hr <- simpleSQ %>% 
+  subset(Exposure_duration == "1hr") 
+summary(simpleSQ1hr$logMeanCopyFinal)
+#6hr
+simpleSQ6hr <- simpleSQ %>% 
+  subset(Exposure_duration == "6hr") 
+summary(simpleSQ6hr$logMeanCopyFinal)
+#12hr
+simpleSQ12hr <- simpleSQ %>% 
+  subset(Exposure_duration == "12hr") 
+summary(simpleSQ12hr$logMeanCopyFinal)
+#24hr
+simpleSQ24hr <- simpleSQ %>% 
+  subset(Exposure_duration == "24hr") 
+summary(simpleSQ24hr$logMeanCopyFinal)
+#48hr
+simpleSQ48hr <- simpleSQ %>% 
+  subset(Exposure_duration == "48hr") 
+summary(simpleSQ48hr$logMeanCopyFinal)
+
+#SHARED
+#5 number summaries - a bit clunky but here it is. 
+simpleSH <- NoZeroesNaiveSH %>% 
+  select(Exposure_duration, logMeanCopyFinal) %>% 
+  mutate(Exposure_duration = as.factor(Exposure_duration))
+#1hr
+simpleSH1hr <- simpleSH %>% 
+  subset(Exposure_duration == "1hr") 
+summary(simpleSH1hr$logMeanCopyFinal)
+#6hr
+simpleSH6hr <- simpleSH %>% 
+  subset(Exposure_duration == "6hr") 
+summary(simpleSH6hr$logMeanCopyFinal)
+#12hr
+simpleSH12hr <- simpleSH %>% 
+  subset(Exposure_duration == "12hr") 
+summary(simpleSH12hr$logMeanCopyFinal)
+#24hr
+simpleSH24hr <- simpleSH %>% 
+  subset(Exposure_duration == "24hr") 
+summary(simpleSH24hr$logMeanCopyFinal)
+#48hr
+simpleSH48hr <- simpleSH %>% 
+  subset(Exposure_duration == "48hr") 
+summary(simpleSH48hr$logMeanCopyFinal)
+
+#-------------------
+
+```
