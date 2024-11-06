@@ -45,6 +45,16 @@ names(MetaTransmit)[7] <- "Exposure_duration"
 names(MetaTransmit)[8] <- "Animal_type"
 names(MetaTransmit)[9] <- "Death_date"
 names(MetaTransmit)[12] <- "Erin_ID"
+names(MetaTransmit)[13] <- "Well_1"
+names(MetaTransmit)[14] <- "Well_2"
+names(MetaTransmit)[15] <- "Well_3"
+names(MetaTransmit)[16] <- "Status"
+names(MetaTransmit)[17] <- "MeanCopy"
+names(MetaTransmit)[18] <- "Well_1_Redo"
+names(MetaTransmit)[19] <- "Well_2_Redo"
+names(MetaTransmit)[20] <- "Well_3_Redo"
+names(MetaTransmit)[21] <- "Status_Redo"
+names(MetaTransmit)[22] <- "MeanCopy_Redo"
 
 #making a few alterations
 MetaTransmit <- MetaTransmit %>% 
@@ -71,11 +81,11 @@ MetaTransmit$Larval_condition[grepl("AHS", MetaTransmit$Exposure_ID)] = "AHS"
 MetaTransmit$Larval_condition[grepl("EHS", MetaTransmit$Exposure_ID)] = "EHS"
 MetaTransmit$Larval_condition[grepl("ELS", MetaTransmit$Exposure_ID)] = "ELS"
 
-#Creating a single column for Status using Status and Status_1 (from the redos)
+#Creating a single column for Status using Status and Status_Redo (from the redos)
 MetaTransmit$Final_status[grepl("Neg", MetaTransmit$Status)] = "Neg"
 MetaTransmit$Final_status[grepl("Pos", MetaTransmit$Status)] = "Pos"
-MetaTransmit$Final_status[grepl("Neg", MetaTransmit$Status_1)] = "Neg"
-MetaTransmit$Final_status[grepl("Pos", MetaTransmit$Status_1)] = "Pos"
+MetaTransmit$Final_status[grepl("Neg", MetaTransmit$Status_Redo)] = "Neg"
+MetaTransmit$Final_status[grepl("Pos", MetaTransmit$Status_Redo)] = "Pos"
 
 #creating a binomial of infection status
 MetaTransmit$Final_status_binomial[grepl("Pos", MetaTransmit$Final_status)] = "1"
@@ -97,7 +107,7 @@ MetaTransmit <- MetaTransmit %>%
 
 
 #there were a few trio IDs where the animal was paired with a different one than the id number. So I'm fixing these manually. 
-#In Shared (direct contact), ELS.24.4 virus (MR119) was paired with ELS.24.6 naïve (MR326), and ELS.24.6 virus (MR404) was paired with ELS.24.4 naïve (MR324). 
+#In Shared (Cohabitation), ELS.24.4 virus (MR119) was paired with ELS.24.6 naïve (MR326), and ELS.24.6 virus (MR404) was paired with ELS.24.4 naïve (MR324). 
 #Even though the sequential naives were unaffected, I still need to make sure the pairs are the same. So I am just changing the naive shared animals to the opposite trio ID. 
   #ELS.24.6 naïve (MR326) --> ELS.24.4
   #ELS.24.4 naïve (MR324) --> ELS.24.6
@@ -308,11 +318,12 @@ summary(MetaTransmitDateCheck$DeathDateCorrect)
 Subseting out a few smaller data sets for future analysis. 
 Specifically: 
  - Naive
-    - Naive Sequential
+     - Naive Sequential
        - Zeroes removed for viral load
-    - Naive Shared
+     - Naive Shared
        - Zeroes removed for viral load
  - Infected
+     - zeroes removed for viral load
  - Control animals
      - Control pseudo-naive
      - Control pseudo-infected 
@@ -355,6 +366,14 @@ NoZeroesNaiveSQ <- MetaTransmitNaiveSQ %>%
 MetaTransmit_virus <- MetaTransmit %>% 
   subset(MetaTransmit$Animal_type=="Infected",)
 
+#getting rid of the 0s for viral load analysis
+NoZeroesVirus <- MetaTransmit_virus %>% 
+  subset(!(MeanCopyFinal == 0)) %>% 
+  #Adding a variable called logmeancopyfinal without the zeroes
+  mutate(logMeanCopyFinal = log(MeanCopyFinal)) 
+
+
+
 #------------Subsetting  control animals 
 MetaTransmit_controlPN <- MetaTransmit %>% 
   subset(Animal_type=="Control (pseudo-naive)",)
@@ -371,7 +390,7 @@ Naive Suspected Mortalities Based on Death Timing
 
 #facet labels
 # New facet label names for exposure type variable
-exposure.labs <- c("Indirect contact", "Direct contact")
+exposure.labs <- c("Sequential habitation", "Cohabitation")
 names(exposure.labs) <- c("Sequential", "Shared")
 
 MetaTransmit_naive$Death_timing <- as.factor(MetaTransmit_naive$Death_timing)
@@ -379,44 +398,100 @@ MetaTransmit_naive$Exposure_duration_numerical <- as.factor(MetaTransmit_naive$E
 MetaTransmit_naive$Exposure_type <- as.factor(MetaTransmit_naive$Exposure_type)
 MetaTransmit_naive$Exposure_duration_numerical <- as.factor(MetaTransmit_naive$Exposure_duration_numerical)
 
+#Fixed the graph to show proportions instead of counts: 
+
 #annotations for the text on the ggplot
-anno <- data.frame(x1 = c(1, 1, 1, 4, 4, 4), 
-                   y1 = c(20, 16.5, 9, 24, 21.5, 11), 
-                   lab = c("Died after","Died during", "Euthanized", "Died after","Died during", "Euthanized"),
-                   Exposure_type = c("Sequential", "Sequential", "Sequential", "Shared", "Shared", "Shared")
+annotations <- data.frame(x1 = c(1, 1, 1, 4, 4, 4), 
+                   y1 = c(.85, 0.69, 0.4, .95, .86, .5), 
+                   Death_timing = c("Died after","Died during", "Euthanized", 
+                                    "Died after","Died during", "Euthanized"),
+                   Exposure_type = c("Sequential", "Sequential", "Sequential", 
+                                     "Shared", "Shared", "Shared")
                    )
 
-anno
-
-#plot naive animal mortality
-#ggplot(MetaTransmit_naive, aes(x= Exposure_duration_numerical , y= lengths(Exposure_duration), fill = Death_timing)) + 
-ggplot(MetaTransmit_naive, aes(x= Exposure_duration_numerical)) + 
-  stat_count(aes(x = Exposure_duration_numerical, group = Death_timing)) +
-  geom_bar(stat= "identity", mapping = aes(x= Exposure_duration_numerical , y= lengths(Exposure_duration), 
-                                           fill = Death_timing)) +
-  guides(fill=guide_legend(title=NULL)) + 
-  facet_wrap(.~Exposure_type, 
-  labeller = labeller(Exposure_type = exposure.labs) 
-  ) +
-  geom_text(data = anno, aes(x = x1,  y = y1, label = lab), 
-            size = 2.9, family = "helvetica", color = "white") +
+ggplot(data = MetaTransmit_naive, aes(x = Exposure_duration_numerical, fill = Death_timing)) + 
+  geom_bar(position = "fill") +  # This will normalize the heights of the bars to show proportions
+  guides(fill = guide_legend(title = NULL)) + 
+  facet_wrap(.~Exposure_type, labeller = labeller(Exposure_type = exposure.labs)) +
+  geom_text(data = annotations, aes(x = x1, y = y1, label = Death_timing), 
+            size = 2.8, family = "helvetica", 
+            color = c("white", "black", "white", "white", "black", "white"), 
+            fontface = "bold") +
   labs(x = "Time between exposures (hrs)               Exposure period (hrs)", 
-       y = "Susceptible animal counts") + 
+       y = "Proportion") +  # Changed y label to reflect proportions
   theme(text = element_text(size = 2),
         axis.title.y = element_text(size = 15, hjust = 0.7, family = "helvetica"),
         axis.title.x = element_text(size = 15, hjust = 0.3, family = "helvetica"),
         strip.text.x = element_text(size = 20, family = "helvetica"),
         axis.text.x = element_text(size = 15, family = "helvetica"),
         axis.text.y = element_text(size = 15, family = "helvetica"),
-        #axis.ticks.y = element_line(linewidth = 0.5),
-        legend.text=element_text(size=13, family = "helvetica"),
         legend.position = "none") + 
-  scale_fill_brewer(palette="Set2")
-
+  scale_fill_manual(values=c("#A85F82", "#FEFFF3","#000025", "#A85F82", "#FEFFF3","#000025"))
+  
 ggsave(
   'suspectedMortalities.jpg', plot = last_plot(), width = 200, height = 120, units = "mm")
 
 ```
+
+
+Reviewer requested a plot of premature deaths for infective animals too. 
+
+Infective Suspected Mortalities Based on Death Timing
+
+```{r}
+#Suspected Ranavirus Mortalities (Infectives)
+
+#facet labels
+# New facet label names for exposure type variable
+exposure.labs <- c("Sequential habitation", "Cohabitation")
+names(exposure.labs) <- c("Sequential", "Shared")
+
+MetaTransmit_virus$Death_timing <- as.factor(MetaTransmit_virus$Death_timing)
+MetaTransmit_virus$Exposure_duration_numerical <- as.factor(MetaTransmit_virus$Exposure_duration_numerical)
+MetaTransmit_virus$Exposure_type <- as.factor(MetaTransmit_virus$Exposure_type)
+MetaTransmit_virus$Exposure_duration_numerical <- as.factor(MetaTransmit_virus$Exposure_duration_numerical)
+
+#Fixed the graph to show proportions instead of counts: 
+
+#annotations for the text on the ggplot
+annotations <- data.frame(x1 = c(4, 4), 
+                   y1 = c(.9, .4), 
+                   Death_timing = c("Died during", "Euthanized")
+                   )
+
+ggplot(data = MetaTransmit_virus, aes(x = Exposure_duration_numerical, fill = Death_timing)) + 
+  geom_bar(position = "fill") +  # This will normalize the heights of the bars to show proportions
+  guides(fill = guide_legend(title = NULL)) + 
+  #facet_wrap(.~Exposure_type, labeller = labeller(Exposure_type = exposure.labs)) +
+  geom_text(data = annotations, aes(x = x1, y = y1, label = Death_timing), 
+            size = 2.8, family = "helvetica", 
+            color = c("black", "white"), 
+            fontface = "bold") +
+  labs(x = "Exposure period (hrs)", 
+       y = "Proportion") +  # Changed y label to reflect proportions
+  theme(text = element_text(size = 2),
+        axis.title.y = element_text(size = 15, hjust = 0.5, family = "helvetica"),
+        axis.title.x = element_text(size = 15, hjust = 0.5, family = "helvetica"),
+        strip.text.x = element_text(size = 20, family = "helvetica"),
+        axis.text.x = element_text(size = 15, family = "helvetica"),
+        axis.text.y = element_text(size = 15, family = "helvetica"),
+        legend.position = "none") + 
+  scale_fill_manual(values=c("#FEFFF3","#000025", "#FEFFF3","#000025"))
+  
+ggsave(
+  'InfectiveSuspectedMortalities.jpg', plot = last_plot(), width = 200, height = 120, units = "mm")
+
+#summary stats for this? 
+summary(MetaTransmit_virus$Death_timing)
+12/127
+
+
+```
+
+
+
+
+
 
 
 Naive Ranavirus Status
@@ -426,24 +501,23 @@ This is much higher than I had expected. Nearly all of the animals got infected.
 
 #annotations
 annotations <- data.frame(x1 = c(1, 1, 1, 1, 1, 3), 
-                   y1 = c(23, 11, .5, 23.7, 11, .5), 
-                   lab = c("Neg","Pos", "NA", "Neg","Pos", "NA"),
+                   y1 = c(.95, .5, .02, .98, .5, .02), 
+                   Final_status = c("Neg","Pos", "NA", "Neg","Pos", "NA"),
                    Exposure_type = c("Sequential", "Sequential", "Sequential", "Shared", "Shared", "Shared")
                    )
 
 #plot naive animal mortality
 #ggplot(MetaTransmit_naive, aes(x= Exposure_duration_numerical, y= lengths(Exposure_duration_numerical), fill = Final_status)) + 
-ggplot(MetaTransmit_naive, aes(x= Exposure_duration_numerical)) + 
-  stat_count(aes(x = Exposure_duration_numerical, group = Final_status)) +
-  geom_bar(stat= "identity", mapping = aes(x= Exposure_duration_numerical , y= lengths(Exposure_duration), 
-                                           fill = Final_status)) +
+ggplot(MetaTransmit_naive, aes(x= Exposure_duration_numerical, fill = Final_status)) + 
+  #stat_count(aes(x = Exposure_duration_numerical, group = Final_status)) +
+  geom_bar(position = "fill") +
   guides(fill=guide_legend(title=NULL)) + 
   facet_wrap(~Exposure_type, 
   labeller = labeller(Exposure_type = exposure.labs)
   ) +
-  geom_text(data = annotations, aes(x = x1,  y = y1, label = lab), size = 3, family = "helvetica", 
-            color = "white") +
-  labs(x = "Time between exposures (hrs)               Exposure period (hrs)", y = "Susceptible animal counts") + 
+  geom_text(data = annotations, aes(x = x1,  y = y1, label = Final_status), size = 3, family = "helvetica", 
+            color = c("black", "white", "white", "black", "white", "white"), fontface = "bold") +
+  labs(x = "Time between exposures (hrs)               Exposure period (hrs)", y = "Susceptible animal proportion") + 
   theme(axis.title.y = element_text(size = 15, hjust = 0.7, family = "helvetica"),
         axis.title.x = element_text(size = 15, hjust = 0.3, family = "helvetica"),
         strip.text.x = element_text(size = 20, family = "helvetica"),
@@ -451,7 +525,6 @@ ggplot(MetaTransmit_naive, aes(x= Exposure_duration_numerical)) +
         axis.text.y = element_text(size = 15, family = "helvetica"),
         legend.text=element_text(size=13, family = "helvetica"),
         legend.position = "none") + 
-  #scale_fill_brewer(palette="Set2")
   scale_fill_manual(breaks = c("Neg", "Pos", NA), 
                        values=c("lightblue", "darkred", "grey"))
 
@@ -627,6 +700,41 @@ ggsave("ViralLoadBoxNoZeroes.jpg", plot = last_plot(), width = 200, height = 120
 ```
 
 
+
+Reviewer requested estimates of the infective frog viral loads. Using the same code as above, just with the infectives. 
+
+```{r}
+
+NoZeroesVirus$Exposure_duration_numerical <- as.factor(NoZeroesVirus$Exposure_duration_numerical)
+
+#boxplots of shared and sequential facet_wrapped
+ggplot(NoZeroesVirus, aes(x=Exposure_duration_numerical, y= MeanCopyFinal, 
+                               fill = Exposure_duration_numerical)) +
+  #geom_violin()+
+  geom_boxplot(alpha=0.5, outlier.shape = NA) + 
+  geom_jitter(size = 0.8, alpha = 0.5, position = position_jitter(width = .2)) +
+  scale_y_continuous(trans='log10') +
+  annotation_logticks(sides = "l", outside = TRUE, 
+                      short = unit(.4,"mm"),
+                      mid = unit(1,"mm"),
+                      long = unit(2,"mm")) +
+  coord_cartesian(clip = "off") +
+  #facet_wrap(~Exposure_type, 
+  #labeller = labeller(Exposure_type = exposure.labs)
+  #) +
+  labs(x = "Exposure period (hrs)", y = "Viral load") + 
+  theme(axis.title.y = element_text(size = 15, hjust = 0.5, family = "helvetica"),
+        axis.title.x = element_text(size = 15, hjust = 0.5, family = "helvetica"),
+        strip.text.x = element_text(size = 20, family = "helvetica"),
+        axis.text.x = element_text(size = 15, family = "helvetica"),
+        axis.text.y = element_text(size = 15, family = "helvetica"),
+        #axis.ticks.length.y = unit(4, "mm"),
+        legend.position = "none") + 
+  scale_fill_brewer(palette = "YlOrRd")
+ggsave("VirusViralLoadBoxNoZeroes.jpg", plot = last_plot(), width = 200, height = 120, units = "mm")
+```
+
+
 #Linear Models for Viral Load and Exposure Durations by Experiment: 
 
 ```{r}
@@ -703,55 +811,117 @@ Sequential_grouped_nozeroes <- Sequential_grouped %>%
 #SHARED
 Shared_grouped_nozeroes$Exposure_duration_numerical <- as.numeric(Shared_grouped_nozeroes$Exposure_duration_numerical)
 
-#the linear model shared. AIC = 692.61
-lm_SH_paired = glm(log(Naive) ~ log(Exposure_duration_numerical), data = Shared_grouped_nozeroes)
-summary(lm_SH_paired)
-plot(lm_SH_paired)
+#all 4 variables
+lm_SH_all_4 = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch + Larval_condition, data = Shared_grouped_nozeroes)
+summary(lm_SH_all_4)
+plot(lm_SH_all_4)
+#AIC = 674.24
+#here, larval_condition is not significant, and neither is log_infected. 
 
-#add in Infective Viral Load as a predictor variable. AIC: 693.56
-lm_SH_paired_plus_inf = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected), data = Shared_grouped_nozeroes)
-summary(lm_SH_paired_plus_inf)
-plot(lm_SH_paired_plus_inf)
+#take out larval condition since it isn't significant. Does it improve AIC?
+lm_SH_no_larval = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch, data = Shared_grouped_nozeroes)
+summary(lm_SH_no_larval)
+plot(lm_SH_no_larval)
+#yes, AIC improved. AIC = 671.32
 
-#ok what if we add in larval condition?  AIC: 697.19
-lm_SH_paired_Inf_Larval = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Larval_condition, data = Shared_grouped_nozeroes)
-summary(lm_SH_paired_Inf_Larval)
-plot(lm_SH_paired_Inf_Larval)
-#nope it's slightly worse. 
+#separately, take out log(infected) since it isn't significant. Does it improve AIC compared to original?
+lm_SH_no_infected = glm(log(Naive) ~ log(Exposure_duration_numerical) + Batch + Larval_condition, data = Shared_grouped_nozeroes)
+summary(lm_SH_no_infected)
+plot(lm_SH_no_infected)
+#yes, AIC improved. AIC = 672.6
 
-#ok what if we add in batch? AIC: 671.32
-lm_SH_paired_Inf_batch = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch, data = Shared_grouped_nozeroes)
-summary(lm_SH_paired_Inf_batch)
-plot(lm_SH_paired_Inf_batch)
+#now take out both log(infected) and larval condition, since these separately improved the model. 
+lm_SH_exposure_and_batch = glm(log(Naive) ~ log(Exposure_duration_numerical) + Batch, data = Shared_grouped_nozeroes)
+summary(lm_SH_exposure_and_batch)
+plot(lm_SH_exposure_and_batch)
+#yes, together these improved the AIC. AIC = 669.43
+#BEST MODEL
 
-#ok what if we keep batch and take out log(infected)? AIC: 669.43. BEST MODEL (by a tiny bit)
-lm_SH_paired_batch = glm(log(Naive) ~ log(Exposure_duration_numerical) + Batch, data = Shared_grouped_nozeroes)
-summary(lm_SH_paired_batch)
-plot(lm_SH_paired_batch)
+#testing just exposure. (predicted to be worse. this is verification)
+lm_SH_exposure = glm(log(Naive) ~ log(Exposure_duration_numerical) , data = Shared_grouped_nozeroes)
+summary(lm_SH_exposure)
+plot(lm_SH_exposure)
+#worse model. AIC = 692.61
+
+#testing only batch (predicted to be worse. this is verification)
+lm_SH_batch = glm(log(Naive) ~ Batch, data = Shared_grouped_nozeroes)
+summary(lm_SH_batch)
+plot(lm_SH_batch)
+#worse model. AIC = 704.64
+
+
+#individual variable tests
+#also removing the 2 significant vars with an n-1 approach
+lm_SH_no_batch = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Larval_condition, data = Shared_grouped_nozeroes)
+summary(lm_SH_no_batch)
+#predicted correctly to be worse. AIC = 697.19
+
+#also removing the 2 significant vars with an n-1 approach
+lm_SH_no_exposure = glm(log(Naive) ~ log(Infected) + Batch + Larval_condition, data = Shared_grouped_nozeroes)
+summary(lm_SH_no_exposure)
+#also worse. AIC= 696.74
+
+
+#3 variable model <-- USING THIS ONE
+lm_SH_all_3 = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch, data = Shared_grouped_nozeroes)
+summary(lm_SH_all_3)
+plot(lm_SH_all_3)
 
 #-----------------------------
 #SEQUENTIAL
 Sequential_grouped_nozeroes$Exposure_duration_numerical <- as.numeric(Sequential_grouped_nozeroes$Exposure_duration_numerical)
 
-#the linear model SQ: AIC: 672.39
-lm_SQ_paired = glm(log(Naive) ~ log(Exposure_duration_numerical), data = Sequential_grouped_nozeroes)
-summary(lm_SQ_paired)
-plot(lm_SQ_paired)
+#all 4 variables
+lm_SQ_all_4 = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch + Larval_condition, data = Sequential_grouped_nozeroes)
+summary(lm_SQ_all_4)
+#AIC: 676.36
+#batch and larval condition not significant. log(infected) is borderline
 
-#add in Infective Viral Load as a predictor variable: AIC: 672.15. BEST MODEL (by a little bit). 
-lm_SQ_paired_plus_inf = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected), data = Sequential_grouped_nozeroes)
-summary(lm_SQ_paired_plus_inf)
-plot(lm_SQ_paired_plus_inf)
+#take out batch --> improved model AIC
+lm_SQ_no_batch = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Larval_condition, data = Sequential_grouped_nozeroes)
+summary(lm_SQ_no_batch)
+#AIC: 674.65
 
-#ok what if we add in larval condition? AIC: 674.65
-lm_SQ_paired_Inf_Larval = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Larval_condition, data = Sequential_grouped_nozeroes)
-summary(lm_SQ_paired_Inf_Larval)
-plot(lm_SQ_paired_Inf_Larval)
+#separately, take out larval condition --> improved model AIC
+lm_SQ_no_larval = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch, data = Sequential_grouped_nozeroes)
+summary(lm_SQ_no_larval)
+#AIC: 673.71
 
-#ok what if we add in batch? AIC: 673.71. 
-lm_SQ_paired_Inf_batch = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch, data = Sequential_grouped_nozeroes)
-summary(lm_SQ_paired_Inf_batch)
-plot(lm_SQ_paired_Inf_batch)
+#combine the 2 - no larval and no batch. It's slightly better. 
+lm_SQ_exposure_and_infected = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected), data = Sequential_grouped_nozeroes)
+summary(lm_SQ_exposure_and_infected)
+#AIC: 672.15
+#BEST MODEL
+
+#testing eliminating the significant and borderline sig variables (combinations of 3): should be worse
+#no log infected --> worse model AIC
+lm_SQ_no_infected = glm(log(Naive) ~ log(Exposure_duration_numerical) + Batch + Larval_condition, data = Sequential_grouped_nozeroes)
+summary(lm_SQ_no_infected)
+#AIC: 677.84
+
+#no exposure duration  --> worse model AIC
+lm_SQ_no_exposure = glm(log(Naive) ~ log(Infected) + Batch + Larval_condition, data = Sequential_grouped_nozeroes)
+summary(lm_SQ_no_exposure)
+#AIC: 679.85
+
+
+#what about individual variables (test just one?)
+lm_SQ_exposure = glm(log(Naive) ~ log(Exposure_duration_numerical), data = Sequential_grouped_nozeroes)
+summary(lm_SQ_exposure)
+#AIC: 672.39
+#it's really really close, but including infected does improve the model slightly
+
+lm_SQ_infected = glm(log(Naive) ~ log(Infected), data = Sequential_grouped_nozeroes)
+summary(lm_SQ_infected)
+#AIC: 676.59
+#this is worse 
+
+
+
+#3 variable model <-- USING THIS ONE
+lm_SQ_all_3 = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch, data = Sequential_grouped_nozeroes)
+summary(lm_SQ_all_3)
+plot(lm_SQ_all_3)
 
 ```
 
@@ -910,4 +1080,20 @@ summary(simpleSH48hr$logMeanCopyFinal)
 
 #-------------------
 
+#Citations of packages
+citation()
+R.version
+
+library(dplyr)
+library(report)
+report::cite_packages()
+
+
+library(purrr)
+
+package_bibtex <- c("tidyverse", "ggplot2", "readr", "stringr", "lubridate", "RColorBrewer", "rstatix", "dplyr", "ggpubr", "gridExtra") %>%
+  map(citation) %>%
+  print(style = "bibtex")
+
+save(package_bibtex, file = "PackageBibtex.BibLaTeX")
 ```
