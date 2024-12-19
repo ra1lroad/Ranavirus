@@ -315,6 +315,187 @@ summary(MetaTransmitDateCheck$DeathDateCorrect)
 ```
 
 
+Loading in the pre-metamorph data from Nicole. 
+This is the masses and metamorphosis dates. 
+
+```{r}
+
+library(dplyr)
+pre_exposure <- read_csv("form-1__pre-exposure-animals.csv")
+
+pre_exposure <- pre_exposure %>% 
+  rename(Container_ID = `1_Container_ID_ex_EL`, 
+         Animal_type = `2_Was_the_animal_a_v`,
+         Larval_tank = `3_Larval_Tank`,
+         Date_metamorphed = `4_Date_metamorphed`, 
+         Date_tail_absorbed = `5_Date_tail_absorbed`, 
+         Mass_at_mass_date = `6_Mass_at_mass_date_`, 
+         SVL_at_mass_date = `7_SVL_at_mass_date`, 
+         Date_group_housed = `8_Date_communally_ho`) %>% 
+  select(-c(ec5_uuid, uploaded_at, title, created_by)) %>% 
+  filter(!Animal_type == "Virus") %>% 
+  mutate(Date_metamorphed = dmy(Date_metamorphed), 
+         Date_tail_absorbed = dmy(Date_tail_absorbed), 
+         Date_group_housed = dmy(Date_group_housed))
+
+class(pre_exposure$Date_metamorphed)
+
+#were there differences between the masses of the two batches? 
+
+ggplot(pre_exposure, aes(x=Date_tail_absorbed, y=Mass_at_mass_date)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "blue")
+
+#there are a couple of outlier points that definitely don't make sense. 
+#check to see if the metamorph date is a little bit before tail absorption, and if group housed date is after tail absorption
+#so: Date_metamorphed < Date_tail_absorbed < Date_group_housed
+
+pre_exposure <- pre_exposure %>% 
+    mutate(Dates_in_order = Date_metamorphed <= Date_tail_absorbed & 
+             Date_tail_absorbed <= Date_group_housed)
+
+summary(pre_exposure$Dates_in_order)
+
+wrong_dates <- pre_exposure %>% 
+  filter(Dates_in_order == FALSE)
+
+#3 dates are out of order. I think that I will just use date tail absorbed instead of date metamorphed
+
+#SVL
+ggplot(pre_exposure, aes(x=Date_tail_absorbed, y=SVL_at_mass_date)) +
+  geom_point() +
+  geom_smooth(method = "lm", color = "blue")
+
+#what are the batch start dates for my experiment? 
+summary(MetaTransmit$Exposure_start[MetaTransmit$Batch == 1])
+#batch 1 starts 6/27 - 6/29
+
+summary(MetaTransmit$Exposure_start[MetaTransmit$Batch == 2])
+#batch 2 starts 7/11 - 7/13
+
+#can I figure out exactly which batch was which using the pre-exp IDs / container IDs? 
+MetaTransmit$Pre_exp_ID <- as.factor(MetaTransmit$Pre_exp_ID)
+summary(MetaTransmit$Pre_exp_ID)
+
+pre_exposure$Container_ID <- as.factor(pre_exposure$Container_ID)
+summary(pre_exposure$Container_ID)
+
+Container_ID_summaries <- pre_exposure %>% 
+  select(Date_metamorphed, Container_ID, Date_tail_absorbed, Date_group_housed, 
+         Mass_at_mass_date, SVL_at_mass_date) %>% 
+  dplyr::group_by(Container_ID) %>% 
+  dplyr::summarize(
+    # Date range for Date_metamorphed
+    date_meta_start = min(Date_metamorphed, na.rm = TRUE),
+    date_meta_mean = mean(Date_metamorphed, na.rm = TRUE),
+    date_meta_end = max(Date_metamorphed, na.rm = TRUE),
+    # Date range for Date_tail_absorbed
+    date_tail_absorbed_start = min(Date_tail_absorbed, na.rm = TRUE),
+    date_tail_absorbed_mean = mean(Date_tail_absorbed, na.rm = TRUE),
+    date_tail_absorbed_end = max(Date_tail_absorbed, na.rm = TRUE),
+    # Date range for Date_metamorphed
+    date_housed_start = min(Date_group_housed, na.rm = TRUE),
+    date_housed_mean = mean(Date_group_housed, na.rm = TRUE),
+    date_housed_end = max(Date_group_housed, na.rm = TRUE),
+    # Additional summary statistics
+    avg_mass = mean(Mass_at_mass_date, na.rm = TRUE),
+    avg_svl = mean(SVL_at_mass_date, na.rm = TRUE),
+    count = n()
+  )
+
+#now lets see if we can get a list of pre exposure IDs from meta transmit by batch
+MetaTransmit$Batch <- as.numeric(MetaTransmit$Batch)
+
+Pre_exp_ID_summaries <- MetaTransmit %>% 
+  select(Pre_exp_ID, Batch) %>% 
+  group_by(Pre_exp_ID) %>% 
+  dplyr::summarize(
+    Batch_consensus = mean(Batch, na.rm = TRUE), 
+    count = n()
+  )
+
+Pre_exp_ID_summaries <- Pre_exp_ID_summaries %>% 
+  mutate(Batch_known = case_when(
+    Batch_consensus < 2.01 & Batch_consensus > 1.99 ~ 2, 
+    Batch_consensus < 1.01 & Batch_consensus > 0.99 ~ 1, 
+    .default = NA
+  ), 
+  Batch_approx = round(Batch_consensus, 0))
+
+Joined_ID_summaries <- Container_ID_summaries %>% 
+  left_join(Pre_exp_ID_summaries, by = join_by(Container_ID == Pre_exp_ID))
+
+
+#is there a difference in mass and SVL by batch? 
+#MASS
+Joined_ID_summaries$Batch_known <- as.factor(Joined_ID_summaries$Batch_known)
+
+ggplot(Joined_ID_summaries, aes(y=avg_mass, x=Batch_known, fill = Batch_known)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Set3")
+
+t_test_mass <- t.test(Joined_ID_summaries$avg_mass[Joined_ID_summaries$Batch_known == 1], 
+                      Joined_ID_summaries$avg_mass[Joined_ID_summaries$Batch_known == 2], 
+                      var.equal = TRUE)
+print(t_test_mass)
+
+#the differences in means are statistically significant. Reject null hypothesis. p-value = 0.004223
+
+#but let's also check by weighting the T tests by our counts. 
+sum(Joined_ID_summaries$count.y, na.rm = TRUE)
+sum(Joined_ID_summaries$count.x, na.rm = TRUE)
+
+library(weights)
+weighted_t_test_mass <- wtd.t.test(
+  x = Joined_ID_summaries$avg_mass[Joined_ID_summaries$Batch_known == 1],
+  y = Joined_ID_summaries$avg_mass[Joined_ID_summaries$Batch_known == 2],
+  weight = Joined_ID_summaries$count.y[Joined_ID_summaries$Batch_known == 1],
+  weighty = Joined_ID_summaries$count.y[Joined_ID_summaries$Batch_known == 2]
+)
+
+print(weighted_t_test_mass)
+
+#also significant. p = 0.001509168. Reject the null, so the groups are different. 
+#batch 1 = 0.29482312 g
+#batch 2 = 0.34797262 g
+
+#SVL
+ggplot(Joined_ID_summaries, aes(y=avg_svl, x=Batch_known, fill = Batch_known)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "Set3")
+
+t_test_svl <- t.test(Joined_ID_summaries$avg_svl[Joined_ID_summaries$Batch_known == 1], 
+                      Joined_ID_summaries$avg_svl[Joined_ID_summaries$Batch_known == 2], 
+                      var.equal = TRUE)
+print(t_test_svl)
+
+#yep SVL is significantly different. reject the null. 
+#batch 1 SVL mean = 13.74603
+#batch 2 SVL mean = 14.26265
+
+#weighted t test
+weighted_t_test_svl <- wtd.t.test(
+  x = Joined_ID_summaries$avg_svl[Joined_ID_summaries$Batch_known == 1],
+  y = Joined_ID_summaries$avg_svl[Joined_ID_summaries$Batch_known == 2],
+  weight = Joined_ID_summaries$count.y[Joined_ID_summaries$Batch_known == 1],
+  weighty = Joined_ID_summaries$count.y[Joined_ID_summaries$Batch_known == 2]
+)
+
+print(weighted_t_test_svl)
+
+#significant p value. 0.001448863. reject the null. 
+#batch 1 SVL mean = 13.619
+#batch 2 SVL mean = 14.226
+
+MetaTransmit <- MetaTransmit %>% 
+  left_join(Joined_ID_summaries, by = join_by(Pre_exp_ID == Container_ID))
+```
+
+
+
+
+
+
 Subseting out a few smaller data sets for future analysis. 
 Specifically: 
  - Naive
@@ -766,29 +947,45 @@ The goal here is to compare the viral load of the infected animal with the paire
 
 ```{r}
 #Ok so this is pairing the infected animal with the naive animal by ID for the Shared housing experiment. 
+class(MetaTransmit$avg_mass)
+
 #Shared Housing
 Shared_grouped <- MetaTransmit %>% 
-  #subset(!(MeanCopyFinal == 0)) %>%
   select(Trio_ID, Exposure_type, MeanCopyFinal, Animal_type, Exposure_duration_numerical, Larval_condition, Batch) %>% 
-  filter(Exposure_type == "Shared" & Animal_type == "Infected" | 
-           Exposure_type == "Shared" & Animal_type == "Naive") %>% 
+  filter((Exposure_type == "Shared" & Animal_type == "Infected") | 
+           (Exposure_type == "Shared" & Animal_type == "Naive")) %>% 
   select(Trio_ID, Animal_type, MeanCopyFinal, Exposure_duration_numerical, Larval_condition, Batch) %>% 
   pivot_wider(names_from = Animal_type, values_from = MeanCopyFinal)
 
+# Separate avg_mass for "Naive" before pivoting
+metamorph_stats_naive_SH <- MetaTransmit %>%
+  filter(Exposure_type == "Shared" & Animal_type == "Naive") %>%
+  select(Trio_ID, avg_mass, avg_svl)
+
+#add it back in
+Shared_grouped <- Shared_grouped %>% 
+  left_join(metamorph_stats_naive_SH, by = "Trio_ID")
+
 #Sequential Housing
 Sequential_grouped <- MetaTransmit %>% 
-  #subset(!(MeanCopyFinal == 0)) %>%
   select(Trio_ID, Exposure_type, MeanCopyFinal, Animal_type, Exposure_duration_numerical, Larval_condition, Batch) %>% 
-  filter(Exposure_type == "Shared" & Animal_type == "Infected" | 
-           Exposure_type == "Sequential" & Animal_type == "Naive") %>% 
+  filter((Exposure_type == "Shared" & Animal_type == "Infected") | 
+           (Exposure_type == "Sequential" & Animal_type == "Naive")) %>% 
   select(Trio_ID, Animal_type, MeanCopyFinal, Exposure_duration_numerical, Larval_condition, Batch) %>% 
   pivot_wider(names_from = Animal_type, values_from = MeanCopyFinal)
+
+# Separate avg_mass for "Naive" before pivoting
+metamorph_stats_naive_SQ <- MetaTransmit %>%
+  filter(Exposure_type == "Sequential" & Animal_type == "Naive") %>%
+  select(Trio_ID, avg_mass, avg_svl)
+
+#add it back in
+Sequential_grouped <- Sequential_grouped %>% 
+  left_join(metamorph_stats_naive_SQ, by = "Trio_ID")
 
 #---------------------------------------
 #Can I group the data better?
 merged_groups <- merge(Shared_grouped, Sequential_grouped, all.x = TRUE, all.y = TRUE)
-
-#merged_groups$Exposure_type_naive <- ifelse(grepl("Shared", merged_groups$Exposure_type), "Shared", "Sequential")
 
 Grouped_data <- MetaTransmit %>% 
   select(Trio_ID, Exposure_type, MeanCopyFinal, Animal_type, Exposure_duration_numerical, Larval_condition, Batch) %>% 
@@ -810,6 +1007,12 @@ Sequential_grouped_nozeroes <- Sequential_grouped %>%
 
 #SHARED
 Shared_grouped_nozeroes$Exposure_duration_numerical <- as.numeric(Shared_grouped_nozeroes$Exposure_duration_numerical)
+
+#all the vars
+lm_SH_all = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch + Larval_condition + avg_mass + avg_svl, data = Shared_grouped_nozeroes)
+summary(lm_SH_all)
+plot(lm_SH_all)
+
 
 #all 4 variables
 lm_SH_all_4 = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch + Larval_condition, data = Shared_grouped_nozeroes)
@@ -867,6 +1070,15 @@ lm_SH_all_3 = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) 
 summary(lm_SH_all_3)
 plot(lm_SH_all_3)
 
+#5 var model (adding in mass and svl at metamorphosis)
+lm_SH_5 = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch + avg_mass + avg_svl, data = Shared_grouped_nozeroes)
+summary(lm_SH_5)
+plot(lm_SH_5)
+
+#ok larval mass at metamorphosis and SVL are not significant predictors, even though batch still is. 
+#this means that even though the batch 2 frogs are larger at metamorphosis, that is not the reason for the higher viral loads in Batch 2. 
+
+
 #-----------------------------
 #SEQUENTIAL
 Sequential_grouped_nozeroes$Exposure_duration_numerical <- as.numeric(Sequential_grouped_nozeroes$Exposure_duration_numerical)
@@ -916,6 +1128,14 @@ summary(lm_SQ_infected)
 #AIC: 676.59
 #this is worse 
 
+#testing metamorphosis mass and svl
+#5 var model (adding in mass and svl at metamorphosis to the 3 var model)
+lm_SQ_5 = glm(log(Naive) ~ log(Exposure_duration_numerical) + log(Infected) + Batch + avg_mass + avg_svl, data = Sequential_grouped_nozeroes)
+summary(lm_SQ_5)
+plot(lm_SQ_5)
+
+#ok larval mass at metamorphosis and SVL are not significant predictors, even though batch still is. 
+#this means that even though the batch 2 frogs are larger at metamorphosis, that is not the reason for the higher viral loads in Batch 2. 
 
 
 #3 variable model <-- USING THIS ONE
@@ -966,6 +1186,11 @@ summary(res_aov_SQ)
 write.csv(MetaTransmit, "MetaTransmitCleaned.csv", row.names=FALSE)
 
 ```
+
+
+
+
+
 
 All the Summary Stats I need 
 ```{r}
